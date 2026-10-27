@@ -32,6 +32,7 @@ import android.view.View
 import android.view.View.NO_ID
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams
+import android.view.WindowManagerGlobal
 import androidx.activity.setViewTreeOnBackPressedDispatcherOwner
 import androidx.annotation.LayoutRes
 import androidx.compose.runtime.Composable
@@ -437,11 +438,26 @@ public class PaparazziSdk @JvmOverloads constructor(
        * uses sChoreographerTime to calculate nanoTime via [System_Delegate.nanoTime].
        */
       Choreographer_Delegate.doFrame(currentTimeNanos)
+      setDrawingTime(frameNanos)
 
       return block()
     } catch (e: Throwable) {
       Bridge.getLog().error("broken", "Failed executing Choreographer#doFrame", e, null, null)
       throw e
+    }
+  }
+
+  /**
+   * On a device, `ViewRootImpl#draw` sets each window's drawing time from the frame time, and legacy
+   * view animations ([android.view.animation.Animation]) compute their progress from it. layoutlib
+   * draws the windows' views itself rather than through `ViewRootImpl#draw`, so without this every
+   * such animation renders its first frame regardless of the snapshot offset.
+   */
+  private fun setDrawingTime(frameNanos: Long) {
+    val drawingTimeMillis = TimeUnit.NANOSECONDS.toMillis(frameNanos)
+    for (windowView in WindowManagerGlobal.getInstance().windowViews) {
+      val attachInfo = attachInfoField.get(windowView) ?: continue
+      drawingTimeField.setLong(attachInfo, drawingTimeMillis)
     }
   }
 
@@ -672,6 +688,15 @@ public class PaparazziSdk @JvmOverloads constructor(
   }
 
   internal companion object {
+    // Lazy, because loading AttachInfo loads ViewRootImpl, which LayoutlibPatch must see first.
+    private val attachInfoField by lazy {
+      View::class.java.getDeclaredField("mAttachInfo").apply { isAccessible = true }
+    }
+    private val drawingTimeField by lazy {
+      Class.forName("android.view.View\$AttachInfo").getDeclaredField("mDrawingTime")
+        .apply { isAccessible = true }
+    }
+
     internal lateinit var renderer: Renderer
     internal val isInitialized get() = ::renderer.isInitialized
 
